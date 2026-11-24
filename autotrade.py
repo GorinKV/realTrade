@@ -330,6 +330,8 @@ def render(result: dict) -> str:
     ]
     if result.get("pick"):
         lines.append(f"  выбран: {result['pick']}")
+    if not result.get("traded") and result.get("reason"):
+        lines.append(f"  причина: {result['reason']}")
     res = result.get("result") or {}
     if res.get("order_id"):
         lines.append(
