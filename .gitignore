@@ -3,3 +3,5 @@
 __pycache__/
 .pytest_cache/
 trades_journal.jsonl
+trailing_state.json
+trailing.log
