@@ -101,6 +101,7 @@ def tick(
     trail: float,
     *,
     step: float = 0.01,
+    min_move: float = 0.0,
     state_file: Path = STATE_FILE,
     log=print,
 ) -> dict:
@@ -127,15 +128,23 @@ def tick(
 
     state["best"] = best
     state["trail"] = trail
+    state["min_move"] = min_move
     state["quantity"] = quantity
     state["updated"] = datetime.now(MSK).isoformat()
 
-    if current and current_sl is not None and current_sl >= desired - step / 2:
-        state["sl"] = current_sl
-        state["order_id"] = current.get("order_id")
-        save_state(state_file, state)
-        log(f"{symbol}: last {last}, best {best}, стоп {current_sl} — без изменений")
-        return {"status": "hold", "last": last, "best": best, "sl": current_sl}
+    if current and current_sl is not None:
+        # Двигаем только после прохода min_move пунктов от текущего стопа,
+        # иначе стоп дёргался бы на каждом шаге цены. Минимум — один шаг.
+        threshold = max(min_move, step)
+        if desired - current_sl < threshold - step / 2:
+            state["sl"] = current_sl
+            state["order_id"] = current.get("order_id")
+            save_state(state_file, state)
+            log(
+                f"{symbol}: last {last}, best {best}, стоп {current_sl} — "
+                f"ждём +{min_move} пп (накоплено {desired - current_sl:+.2f})"
+            )
+            return {"status": "hold", "last": last, "best": best, "sl": current_sl}
 
     # Сначала снимаем старый стоп, потом ставим новый: два SL одновременно
     # могут продать позицию дважды.
@@ -177,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qty", type=int, required=True)
     parser.add_argument("--trail", type=float, required=True, help="отступ стопа в пунктах цены (0.3 = 30 пп)")
     parser.add_argument("--step", type=float, default=0.01, help="шаг цены инструмента")
+    parser.add_argument("--min-move", type=float, default=0.0,
+                        help="двигать стоп только после прохода N пунктов (0.1 = 10 пп)")
     parser.add_argument("--interval", type=float, default=15.0, help="секунд между тактами в режиме цикла")
     parser.add_argument("--once", action="store_true", help="один такт (для автоматизации)")
     parser.add_argument("--state", default=str(STATE_FILE))
@@ -193,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             args.qty,
             args.trail,
             step=args.step,
+            min_move=args.min_move,
             state_file=state_file,
         )
 
@@ -201,7 +213,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result.get("status") in {"moved", "hold", "closed"} else 1
 
-    print(f"Трейлинг {symbol}: отступ {args.trail}, шаг {args.step}, интервал {args.interval} c. Ctrl+C — стоп.")
+    print(
+        f"Трейлинг {symbol}: отступ {args.trail}, шаг {args.step}, "
+        f"сдвиг после {args.min_move} пп, интервал {args.interval} c. Ctrl+C — стоп."
+    )
     while True:
         try:
             result = run_once()

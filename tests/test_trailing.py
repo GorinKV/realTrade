@@ -99,6 +99,23 @@ def test_tick_never_moves_stop_down(tmp_path):
     assert client.canceled == []
 
 
+def test_tick_moves_only_after_min_move(tmp_path):
+    """Стоп сдвигается после прохода 10 пп (0.1), а не на каждом шаге."""
+    client = FakeClient(last=89.75, sl=89.39)  # расчётный 89.45: всего +0.06
+    state = tmp_path / "state.json"
+    result = tick(client, "BRZ6@RTSX", 1, 0.3, step=0.01, min_move=0.1,
+                  state_file=state, log=lambda *_: None)
+    assert result["status"] == "hold"
+    assert result["sl"] == 89.39
+    assert client.placed == []
+
+    client.last = 89.80  # best 89.80 -> расчётный 89.50: +0.11 от стопа
+    result = tick(client, "BRZ6@RTSX", 1, 0.3, step=0.01, min_move=0.1,
+                  state_file=state, log=lambda *_: None)
+    assert result["status"] == "moved"
+    assert result["sl"] == 89.5
+
+
 def test_tick_remembers_best_price_between_ticks(tmp_path):
     client = FakeClient(last=90.0, sl=88.69)
     state = tmp_path / "state.json"
