@@ -1,0 +1,17 @@
+{
+  "_note": "Лимиты предторговой проверки Finam. Правьте осторожно: блокирующие проверки останавливают заявку.",
+  "max_spread_pct": 0.4,
+  "max_price_deviation_pct": 1.0,
+  "max_order_value_rub": 50000,
+  "max_position_share_pct": 25.0,
+  "commission_pct": 0.3,
+  "risk_pct": 0.5,
+  "quote_max_age_sec": 300,
+  "allow_market_orders": true,
+  "session": {
+    "start": "10:00",
+    "end": "18:40",
+    "evening_start": "19:00",
+    "evening_end": "23:50"
+  }
+}

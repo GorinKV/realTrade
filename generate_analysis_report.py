@@ -1,121 +1,237 @@
 #!/usr/bin/env python3
-"""Часовой анализ портфеля (realTrade).
+"""Часовой анализ рынка и портфеля (realTrade).
 
-Данные через локальный сервис https://127.0.0.1:9443:
-  - /api/moex/day/summary  — дневной свод (open/high/low/close/change, объём)
-  - /api/tinkoff/orderbook — стакан LQDT (поллер торгует LQDT только вручную)
+1. Портфель Finam (счёт 950034): equity, кэш, позиции, защитные SL/TP.
+2. Скринер «in play» по всему TQBR (MOEX ISS): RVOL, расширение диапазона,
+   ATR, гэп, тренд — с готовым планом входа/стопа/цели.
+3. Проверка финалистов по реальному стакану Finam (спред, глубина).
+4. Результат: /opt/app/scripts/analysis/analysis_latest.md + лог + Telegram.
 
-"В списке активов" (in play) — динамический: из дневного свода берутся тикеры
-с объёмом выше порога или с большим дневным Δ (алгоритм поиска in play),
-объединенные с watchlist.
-
-Результат: /opt/app/scripts/analysis/analysis_latest.md + analysis_log.txt,
-и отправляется в Telegram (токен и chat_id из /opt/app/telegram.local.json).
+Запуск:  python generate_analysis_report.py [--no-telegram] [--top N]
 """
 from __future__ import annotations
 
+import argparse
+import html
 import json
-import ssl
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
-BASE = "https://127.0.0.1:9443"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import marketdata  # noqa: E402
+import screener  # noqa: E402
+from finam_client import FinamClient, book_summary, num  # noqa: E402
+
 OUT = Path("/opt/app/scripts/analysis")
-
-WATCHLIST = ["LQDT", "ROSN", "VKCO", "FLOT", "SBER", "X5", "FIXR", "SMLT", "POSI"]
-# алгоритм in play: объём >= VOL_MIN ИЛИ |Δдень| >= CHG_MIN
-VOL_MIN = 20_000
-CHG_MIN = 0.5
-MAX_IN_PLAY = 8
+TELEGRAM_CONF = Path("/opt/app/telegram.local.json")
+MSK = ZoneInfo("Europe/Moscow")
+MAX_SPREAD_PCT = 0.4
 
 
-def get(path: str, **params):
-    url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
+def telegram_send(text: str) -> bool:
     try:
-        with urllib.request.urlopen(url, context=CTX, timeout=15) as r:
-            return json.loads(r.read())
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        return None
-
-
-def in_play_tickers(summary: dict, watchlist: list[str]) -> list[str]:
-    """Динамический список «в списке активов» (in play)."""
-    rows = [p for p in summary.get("prices", []) if p.get("ticker")]
-    inplay = [
-        p["ticker"] for p in rows
-        if p.get("volume", 0) >= VOL_MIN or abs(p.get("change_day_pct", 0)) >= CHG_MIN
-    ]
-    # сортируем по объёму вниз, добавляем watchlist, ограничиваем
-    inplay.sort(key=lambda t: -next((p["volume"] for p in rows if p["ticker"] == t), 0))
-    seen: set[str] = set()
-    out = [t for t in inplay + watchlist if not (t in seen or seen.add(t))][:MAX_IN_PLAY]
-    return out
-
-
-def send_telegram(text: str) -> None:
+        conf = json.loads(TELEGRAM_CONF.read_text(encoding="utf-8"))
+        token, chat = conf.get("bot_token", ""), conf.get("chat_id", "")
+    except (OSError, ValueError):
+        return False
+    if not token or not chat:
+        return False
+    body = urllib.parse.urlencode(
+        {"chat_id": chat, "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    ).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
     try:
-        conf = json.loads(Path("/opt/app/telegram.local.json").read_text())
-        tok, chat = conf.get("bot_token", ""), conf.get("chat_id", "")
-    except Exception:
-        return
-    if not tok or not chat:
-        return
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{tok}/sendMessage",
-            data=urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status == 200
+    except Exception:  # noqa: BLE001 - уведомление не должно ломать отчёт
+        return False
+
+
+def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
+    acc = client.account()
+    equity = num(acc.get("equity"), 0.0) or 0.0
+    cash = client.cash_rub()
+    positions = []
+    for p in acc.get("positions") or []:
+        positions.append(
+            {
+                "symbol": p.get("symbol"),
+                "qty": num(p.get("quantity"), 0.0) or 0.0,
+                "avg": num(p.get("average_price")),
+                "last": num(p.get("current_price")),
+                "pnl": num(p.get("unrealized_pnl"), 0.0) or 0.0,
+            }
         )
-        with urllib.request.urlopen(req, timeout=20) as r:
-            r.read()
-    except Exception:
-        pass
+
+    covered: dict[str, float] = {}
+    pending: list[dict] = []
+    for order in client.active_orders():
+        sltp = order.get("sltp_order") or {}
+        if sltp:
+            symbol = sltp.get("symbol", "")
+            covered[symbol] = covered.get(symbol, 0.0) + (num(sltp.get("quantity_sl"), 0.0) or 0.0)
+            pending.append(
+                {
+                    "order_id": order.get("order_id"),
+                    "symbol": symbol,
+                    "status": order.get("status"),
+                    "sl": num(sltp.get("sl_price")),
+                    "tp": num(sltp.get("tp_price")),
+                    "qty_sl": num(sltp.get("quantity_sl")),
+                    "qty_tp": num(sltp.get("quantity_tp")),
+                }
+            )
+
+    lines = [
+        f"Портфель Finam {client.account_id}: equity {equity:,.2f} ₽, кэш {cash:,.2f} ₽"
+        .replace(",", " ")
+        .replace("₽  кэш", "₽, кэш"),
+    ]
+    for p in positions:
+        lines.append(
+            f"  {p['symbol']}: {p['qty']:.0f} шт, средняя {p['avg']}, последняя {p['last']}, PnL {p['pnl']:+.2f} ₽"
+        )
+    if not positions:
+        lines.append("  позиций нет")
+    for deal in pending:
+        lines.append(
+            f"  защита {deal['symbol']}: SL {deal['sl']} / TP {deal['tp']} "
+            f"(SL {deal['qty_sl']:.0f} шт, TP {deal['qty_tp']:.0f} шт), статус {deal['status']}"
+        )
+    for p in positions:
+        if covered.get(p["symbol"], 0.0) < p["qty"]:
+            lines.append(
+                f"  ⚠️ {p['symbol']}: без стопа {p['qty'] - covered.get(p['symbol'], 0.0):.0f} шт из {p['qty']:.0f}"
+            )
+    return lines, {"equity": equity, "cash": cash, "positions": positions, "protection": pending}
+
+
+def enrich_with_finam(client: FinamClient, candidates: list[dict]) -> list[dict]:
+    """Реальный bid/ask Finam: спред и глубина. Слишком широкий спред — отбрасываем."""
+    out: list[dict] = []
+    for cand in candidates:
+        try:
+            quote = client.quote(cand["ticker"])
+            book = book_summary(client.orderbook(cand["ticker"]))
+        except Exception:  # noqa: BLE001 - без стакана кандидат остаётся, но с пометкой
+            cand["spread_pct"] = None
+            out.append(cand)
+            continue
+        cand["finam_last"] = num(quote.get("last"))
+        cand["finam_bid"] = num(quote.get("bid"))
+        cand["finam_ask"] = num(quote.get("ask"))
+        cand["spread_pct"] = round(book["spread_pct"], 3) if book["spread_pct"] is not None else None
+        cand["bid_depth"] = round(book["bid_depth"], 0)
+        if cand["spread_pct"] is not None and cand["spread_pct"] > MAX_SPREAD_PCT:
+            cand["reject"] = f"спред {cand['spread_pct']:.2f}% > {MAX_SPREAD_PCT}%"
+        out.append(cand)
+    return [c for c in out if not c.get("reject")]
+
+
+def render(result: dict, port_lines: list[str], portfolio: dict) -> str:
+    lines = [f"## {result['generated_at']}", ""]
+    lines += port_lines
+    market = result["market"]
+    lines += [
+        "",
+        f"Рынок: ширина {market['breadth']}% ({market['advancers']}↑ / {market['decliners']}↓), "
+        f"+2%: {market['up2']}, −2%: {market['down2']}, оборот {market['turnover_rub'] / 1e9:.1f} млрд ₽",
+        "",
+    ]
+    if not result["candidates"]:
+        lines.append("Кандидатов нет: ни одна бумага не проходит фильтры ликвидности/ATR/комиссии.")
+        return "\n".join(lines) + "\n"
+
+    lines += [
+        "| # | Тикер | Сетап | Цена | Δдень | RVOL | ATR% | Вход | Стоп | Цель | R:R | Лоты | Спред | Поток T |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for i, c in enumerate(result["candidates"], 1):
+        p = c["plan"]
+        spread = f"{c['spread_pct']:.2f}%" if c.get("spread_pct") is not None else "—"
+        flow = c.get("flow")
+        flow_txt = f"{flow['bias']:+.0f} ({flow['note']})" if flow else "—"
+        lines.append(
+            f"| {i} | {c['ticker']} | {p['setup']} | {c['last']:.4g} | {c['chg']:+.2f}% | "
+            f"{c['rvol']:.1f}× | {c['atr_pct']:.1f} | {p['entry']:.4g} | {p['stop']:.4g} | "
+            f"{p['target']:.4g} | {p['rr']:.1f} | {p['lots']} | {spread} | {flow_txt} |"
+        )
+    lines += [
+        "",
+        "Вход: пробой дневного максимума +0.1 ATR (breakout) либо текущая цена (pullback). "
+        "Стоп 1.2 ATR, цель 2.5 ATR. Риск 0.5% equity; лоты посчитаны от equity и кэша Finam.",
+        "Данные: MOEX ISS (весь рынок) + T-Invest (стакан/лента). Исполнение и проверка перед сделкой: Финам.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_telegram(result: dict, port_lines: list[str], portfolio: dict) -> str:
+    market = result["market"]
+    parts = [
+        f"📊 <b>Анализ {result['generated_at']}</b>",
+        "",
+        *[html.escape(line) for line in port_lines],
+        "",
+        f"Рынок: ширина {market['breadth']}% ({market['advancers']}↑/{market['decliners']}↓), "
+        f"оборот {market['turnover_rub'] / 1e9:.1f} млрд ₽",
+        "",
+    ]
+    if not result["candidates"]:
+        parts.append("Кандидатов нет — фильтры ликвидности/ATR не пройдены.")
+        return "\n".join(parts)
+
+    parts.append("<b>В игре (long):</b>")
+    for i, c in enumerate(result["candidates"], 1):
+        p = c["plan"]
+        spread = f", спред {c['spread_pct']:.2f}%" if c.get("spread_pct") is not None else ""
+        flow = c.get("flow")
+        flow_txt = f", поток {flow['bias']:+.0f}" if flow else ""
+        parts.append(
+            f"{i}. <b>{c['ticker']}</b> {c['last']:.4g} ({c['chg']:+.2f}%), "
+            f"RVOL {c['rvol']:.1f}×, ATR {c['atr_pct']:.1f}%{spread}{flow_txt}\n"
+            f"   вход {p['entry']:.4g} / стоп {p['stop']:.4g} / цель {p['target']:.4g} "
+            f"(R:R {p['rr']:.1f}, {p['lots']} лот)"
+        )
+    parts += ["", "<i>Риск 0.5% equity; комиссия 0.3%/сторона учтена.</i>"]
+    return "\n".join(parts)
 
 
 def main() -> int:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    summary = get("/api/moex/day/summary") or {}
-    days = {p["ticker"]: p for p in summary.get("prices", []) if p.get("ticker")}
-    tickers = in_play_tickers(summary, WATCHLIST)
+    parser = argparse.ArgumentParser(description="Часовой анализ рынка и портфеля")
+    parser.add_argument("--no-telegram", action="store_true")
+    parser.add_argument("--top", type=int, default=8)
+    parser.add_argument("--timeout", type=float, default=25.0)
+    args = parser.parse_args()
 
-    lines: list[str] = []
-    for t in tickers:
-        d = days.get(t)
-        if not d:
-            lines.append(f"- **{t}** — данные дневного свода недоступны")
-            continue
-        lines.append(
-            f"- **{t}** {d.get('close', '?'):>7} (open {d.get('open', '?')}, "
-            f"H {d.get('high', '?')}, L {d.get('low', '?')})  "
-            f"Δдень {d.get('change_day_pct', 0):+.2f}%, V {d.get('volume', 0):,}"
-        )
+    client = FinamClient(timeout=args.timeout)
+    port_lines, portfolio = portfolio_block(client)
+    result = screener.screen(equity=portfolio["equity"], cash=portfolio["cash"], top=args.top + 4)
+    result["candidates"] = enrich_with_finam(client, result["candidates"])
+    for cand in result["candidates"]:
+        marketdata.apply_flow(cand, 1 if cand["chg"] >= 0 else -1)
+    result["candidates"].sort(key=lambda c: c["score"], reverse=True)
+    result["candidates"] = result["candidates"][: args.top]
 
-    ob = get("/api/tinkoff/orderbook", ticker="LQDT", depth=6)
-    if ob and ob.get("bids"):
-        lines.append(
-            "LQDT стакан: " +
-            "биды " + str([(b["price"], b["quantity"]) for b in ob["bids"][:3]]) +
-            " аски " + str([(a["price"], a["quantity"]) for a in ob["asks"][:3]])
-        )
-    tr = get("/api/tinkoff/trades", ticker="LQDT", minutes=60)
-    if tr:
-        lines.append(f"LQDT за 60м: {tr.get('total_trades', 0)} сделок, объём {tr.get('total_volume', 0):,}")
-
-    report = f"## {now}\n\n" + "\n".join(lines) + "\n"
+    report = render(result, port_lines, portfolio)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "analysis_latest.md").write_text(report, encoding="utf-8")
     with (OUT / "analysis_log.txt").open("a", encoding="utf-8") as fh:
-        fh.write(report + "\n")
+        fh.write(report + "\n" + "-" * 40 + "\n")
     print(report)
-    send_telegram(f"📊 <b>Анализ портфеля {now}</b>\n\n" + "\n".join(l.replace("**", "") for l in lines[:8]))
+
+    if not args.no_telegram:
+        ok = telegram_send(render_telegram(result, port_lines, portfolio))
+        print(f"telegram: {'отправлено' if ok else 'не отправлено'}")
     return 0
 
 
