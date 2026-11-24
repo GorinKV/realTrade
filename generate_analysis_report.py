@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import marketdata  # noqa: E402
+import autotrade  # noqa: E402
 import screener  # noqa: E402
 from finam_client import FinamClient, book_summary, num  # noqa: E402
 
@@ -117,30 +117,15 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
 
 
 def enrich_with_finam(client: FinamClient, candidates: list[dict]) -> list[dict]:
-    """Реальный bid/ask Finam: спред и глубина. Слишком широкий спред — отбрасываем."""
-    out: list[dict] = []
-    for cand in candidates:
-        try:
-            quote = client.quote(cand["ticker"])
-            book = book_summary(client.orderbook(cand["ticker"]))
-        except Exception:  # noqa: BLE001 - без стакана кандидат остаётся, но с пометкой
-            cand["spread_pct"] = None
-            out.append(cand)
-            continue
-        cand["finam_last"] = num(quote.get("last"))
-        cand["finam_bid"] = num(quote.get("bid"))
-        cand["finam_ask"] = num(quote.get("ask"))
-        cand["spread_pct"] = round(book["spread_pct"], 3) if book["spread_pct"] is not None else None
-        cand["bid_depth"] = round(book["bid_depth"], 0)
-        if cand["spread_pct"] is not None and cand["spread_pct"] > MAX_SPREAD_PCT:
-            cand["reject"] = f"спред {cand['spread_pct']:.2f}% > {MAX_SPREAD_PCT}%"
-        out.append(cand)
-    return [c for c in out if not c.get("reject")]
+    """Реальные bid/ask Finam + поток T-Invest (общая логика в autotrade)."""
+    return autotrade.enrich_candidates(client, candidates, MAX_SPREAD_PCT)
 
 
-def render(result: dict, port_lines: list[str], portfolio: dict) -> str:
+def render(result: dict, port_lines: list[str], portfolio: dict, trade_text: str | None = None) -> str:
     lines = [f"## {result['generated_at']}", ""]
     lines += port_lines
+    if trade_text:
+        lines += ["", trade_text]
     market = result["market"]
     lines += [
         "",
@@ -175,13 +160,14 @@ def render(result: dict, port_lines: list[str], portfolio: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_telegram(result: dict, port_lines: list[str], portfolio: dict) -> str:
+def render_telegram(result: dict, port_lines: list[str], portfolio: dict, trade_text: str | None = None) -> str:
     market = result["market"]
     parts = [
         f"📊 <b>Анализ {result['generated_at']}</b>",
         "",
         *[html.escape(line) for line in port_lines],
         "",
+        *([html.escape(trade_text), ""] if trade_text else []),
         f"Рынок: ширина {market['breadth']}% ({market['advancers']}↑/{market['decliners']}↓), "
         f"оборот {market['turnover_rub'] / 1e9:.1f} млрд ₽",
         "",
@@ -209,6 +195,7 @@ def render_telegram(result: dict, port_lines: list[str], portfolio: dict) -> str
 def main() -> int:
     parser = argparse.ArgumentParser(description="Часовой анализ рынка и портфеля")
     parser.add_argument("--no-telegram", action="store_true")
+    parser.add_argument("--no-autotrade", action="store_true", help="только анализ, без сделки")
     parser.add_argument("--top", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=25.0)
     args = parser.parse_args()
@@ -217,12 +204,16 @@ def main() -> int:
     port_lines, portfolio = portfolio_block(client)
     result = screener.screen(equity=portfolio["equity"], cash=portfolio["cash"], top=args.top + 4)
     result["candidates"] = enrich_with_finam(client, result["candidates"])
-    for cand in result["candidates"]:
-        marketdata.apply_flow(cand, 1 if cand["chg"] >= 0 else -1)
     result["candidates"].sort(key=lambda c: c["score"], reverse=True)
     result["candidates"] = result["candidates"][: args.top]
 
-    report = render(result, port_lines, portfolio)
+    trade_text = None
+    if not args.no_autotrade:
+        trade_result = autotrade.maybe_trade(client, result["candidates"])
+        trade_text = autotrade.render(trade_result)
+        print(trade_text)
+
+    report = render(result, port_lines, portfolio, trade_text)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "analysis_latest.md").write_text(report, encoding="utf-8")
     with (OUT / "analysis_log.txt").open("a", encoding="utf-8") as fh:
@@ -230,7 +221,7 @@ def main() -> int:
     print(report)
 
     if not args.no_telegram:
-        ok = telegram_send(render_telegram(result, port_lines, portfolio))
+        ok = telegram_send(render_telegram(result, port_lines, portfolio, trade_text))
         print(f"telegram: {'отправлено' if ok else 'не отправлено'}")
     return 0
 

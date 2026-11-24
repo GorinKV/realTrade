@@ -13,5 +13,18 @@
     "end": "18:40",
     "evening_start": "19:00",
     "evening_end": "23:50"
+  },
+  "autotrade": {
+    "_note": "Правило: <3 сделок за день и нагрузка <80% -> одна сделка на 10% депозита из лучшего кандидата.",
+    "enabled": true,
+    "max_trades_per_day": 3,
+    "max_deposit_load_pct": 80.0,
+    "size_pct_of_equity": 10.0,
+    "max_trades_per_symbol_per_day": 1,
+    "min_score": 45.0,
+    "max_spread_pct": 0.25,
+    "min_move_pct": 1.5,
+    "require_flow_not_against": true,
+    "with_protection": true
   }
 }
