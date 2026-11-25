@@ -14,6 +14,13 @@
     "evening_start": "19:00",
     "evening_end": "23:50"
   },
+  "futures_expiry_warn": {
+    "_note": "Правило: напоминание об экспирации фьючерсов — через ≤3 дня, утром и вечером, в 10:00 и 17:00 МСК. Источник экспираций: poll_futures.txt (/opt/app).",
+    "within_days": 3,
+    "times": ["10:00", "17:00"],
+    "tz": "Europe/Moscow",
+    "script": "futures_expiry_watch.py"
+  },
   "autotrade": {
     "_note": "Правило: <50 сделок за день и нагрузка <80% -> одна сделка на 10% депозита из лучшего кандидата.",
     "enabled": true,
