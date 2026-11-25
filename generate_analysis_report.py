@@ -75,7 +75,17 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
 
     covered: dict[str, float] = {}
     pending: list[dict] = []
-    for order in client.active_orders():
+    orders_error = None
+    try:
+        active = client.active_orders()
+    except Exception as exc:  # noqa: BLE001 - 503 на /orders не должен ломать отчёт
+        active = []
+        orders_error = exc
+    if orders_error is not None:
+        lines_orders_warning = f"⚠️ активные заявки недоступны ({orders_error}) — статус защиты не проверен"
+    else:
+        lines_orders_warning = None
+    for order in active:
         sltp = order.get("sltp_order") or {}
         if sltp:
             symbol = sltp.get("symbol", "")
@@ -93,6 +103,7 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
             )
 
     lines = [
+        *([lines_orders_warning] if lines_orders_warning else []),
         f"Портфель Finam {client.account_id}: equity {equity:,.2f} ₽, кэш {cash:,.2f} ₽"
         .replace(",", " ")
         .replace("₽  кэш", "₽, кэш"),
@@ -109,6 +120,8 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
             f"(SL {deal['qty_sl']:.0f} шт, TP {deal['qty_tp']:.0f} шт), статус {deal['status']}"
         )
     for p in positions:
+        if orders_error is not None:
+            break
         if covered.get(p["symbol"], 0.0) < p["qty"]:
             lines.append(
                 f"  ⚠️ {p['symbol']}: без стопа {p['qty'] - covered.get(p['symbol'], 0.0):.0f} шт из {p['qty']:.0f}"
@@ -209,8 +222,11 @@ def main() -> int:
 
     trade_text = None
     if not args.no_autotrade:
-        trade_result = autotrade.maybe_trade(client, result["candidates"])
-        trade_text = autotrade.render(trade_result)
+        try:
+            trade_result = autotrade.maybe_trade(client, result["candidates"])
+            trade_text = autotrade.render(trade_result)
+        except Exception as exc:  # noqa: BLE001 - торговля не должна ломать анализ
+            trade_text = f"Автоторговля: пропуск — не удалось получить состояние счёта/заявок ({exc})"
         print(trade_text)
 
     report = render(result, port_lines, portfolio, trade_text)
