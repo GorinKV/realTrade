@@ -49,9 +49,10 @@ def screen(c: FinamClient, sym: str) -> str:
                         for l in asks[:4])
         lines.append(f"аски: {top}")
     bars = c.bars(sym, timeframe="TIME_FRAME_D", start="2026-10-25T00:00:00Z", end="2026-11-26T00:00:00Z")
-    closes = sorted(num(b.get("close")) for b in (bars or []) if num(b.get("close")))[-6:]
+    closes = [(str(b.get("timestamp", ""))[:10], num(b.get("close"))) for b in (bars or []) if num(b.get("close"))]
+    closes = closes[-6:]
     if closes:
-        lines.append("последние дни: " + ", ".join(f"{d}" for d in closes[-6:]))
+        lines.append("последние дни: " + ", ".join(f"{d[-2:]}:{c:.2f}" for d, c in closes))
     return "\n".join(lines)
 
 
