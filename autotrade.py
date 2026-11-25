@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Правило автоторговли: не больше 3 сделок в день и нагрузка < 80%.
+"""Правило автоторговли: не больше 50 сделок в день и нагрузка < 80%.
 
 После каждого часового анализа:
   1. считаем исполненные сегодня сделки и нагрузку на депозит
@@ -28,7 +28,7 @@ JOURNAL = Path(__file__).with_name("trades_journal.jsonl")
 
 AUTOTRADE_DEFAULTS: dict = {
     "enabled": True,
-    "max_trades_per_day": 3,
+    "max_trades_per_day": 50,
     "max_deposit_load_pct": 80.0,
     "size_pct_of_equity": 10.0,
     "max_trades_per_symbol_per_day": 1,
@@ -353,7 +353,7 @@ def render(result: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Автоторговля по правилу 3 сделки / 80% нагрузки")
+    parser = argparse.ArgumentParser(description="Автоторговля по правилу сделок/нагрузки")
     parser.add_argument("--dry-run", action="store_true", help="только показать решение")
     parser.add_argument("--top", type=int, default=8)
     args = parser.parse_args(argv)

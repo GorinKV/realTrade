@@ -15,9 +15,9 @@
     "evening_end": "23:50"
   },
   "autotrade": {
-    "_note": "Правило: <3 сделок за день и нагрузка <80% -> одна сделка на 10% депозита из лучшего кандидата.",
+    "_note": "Правило: <50 сделок за день и нагрузка <80% -> одна сделка на 10% депозита из лучшего кандидата.",
     "enabled": true,
-    "max_trades_per_day": 3,
+    "max_trades_per_day": 50,
     "max_deposit_load_pct": 80.0,
     "size_pct_of_equity": 10.0,
     "max_trades_per_symbol_per_day": 1,
