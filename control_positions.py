@@ -30,8 +30,12 @@ def trail_longs(c: FinamClient) -> None:
         target_sl = entry + max(0.0, profit_pct - 1.0)
         # SL выше входа для лонга отвергает API (там нет защиты) — ставим на вход
         if target_sl >= entry:
-            target_sl = entry - 0.001
-        target_sl = min(target_sl, last - 0.001)  # API требует SL ниже цены
+            # API отвергает SL выше входа для лонга — ставим на entry − 0.05
+            target_sl = entry - 0.05
+        if last:
+            target_sl = min(target_sl, last - 0.001)  # API требует SL ниже цены
+        if not target_sl or target_sl >= last:
+            continue
         active = {o.get("sltp_order", {}).get("symbol"): o for o in c.active_orders() if o.get("sltp_order")}
         s = active.get(sym) or {}
         sltp = s.get("sltp_order") or {}
@@ -40,8 +44,21 @@ def trail_longs(c: FinamClient) -> None:
             continue
         if s.get("order_id"):
             c.cancel_order(s["order_id"])
-        c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=target_sl, comment="trail 1%/1%")
-        print(f"{sym}: SL перенесён на {target_sl:.2f} (PnL +{profit_pct:.2f}%)")
+        placed = False
+        for margin in (0.05, 0.1, 0.2, 0.3):
+            cand = entry - margin
+            if cand >= last:
+                continue
+            try:
+                c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=cand, comment="trail 1%/1%")
+                print(f"{sym}: SL {cand:.4f} (PnL +{profit_pct:.2f}%), margin {margin}")
+                placed = True
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+        if not placed:
+            print(f"{sym}: не удалось выставить SL ({exc})")
 
 
 def main() -> None:
