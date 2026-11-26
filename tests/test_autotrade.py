@@ -123,14 +123,20 @@ def test_check_rule_allows_under_limits():
     assert state["load_pct"] == 10.0
 
 
-def test_check_rule_blocks_three_trades():
+def test_check_rule_allows_few_trades():
     state = check_rule(FakeClient(trades=3), autotrade_cfg(), NOW)
+    assert state["allowed"] is True
+    assert state["trades_today"] == 3
+
+
+def test_check_rule_blocks_max_trades_per_day():
+    state = check_rule(FakeClient(trades=50), autotrade_cfg(), NOW)
     assert state["allowed"] is False
     assert "сделок" in state["reason"]
 
 
 def test_check_rule_blocks_high_load():
-    state = check_rule(FakeClient(trades=1, load_equity=100000, invested=85000), autotrade_cfg(), NOW)
+    state = check_rule(FakeClient(trades=1, load_equity=100000, invested=98000), autotrade_cfg(), NOW)
     assert state["allowed"] is False
     assert "нагрузка" in state["reason"]
 

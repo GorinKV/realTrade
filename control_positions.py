@@ -8,9 +8,25 @@
 Правила (от пользователя):
   - стопы ставятся на акциях (лонги);
   - при прибыли > 1% SL переносится в безубыток (вход);
-  - далее каждый 1% прибыли стоп трейлится на 1% прибыли выше входа.
+  - далее каждый 1% прибыли стоп трейлится на 1% прибыли выше входа;
+  - при прибыли > aggressive_from (3%) стоп ставится на aggressive_trail_frac (0.5%)
+    от текущей цены — агрессивный трейлинг.
 """
 from finam_client import FinamClient, norm_symbol, num
+from pretrade import load_config
+
+AGGRESSIVE_PROFIT_PCT = 3.0
+AGGRESSIVE_TRAIL_FRAC = 0.005
+
+
+def _trail_params(cfg: dict | None = None) -> tuple[float, float]:
+    """(агрессивный порог прибыли в %, агрессивный отступ от цены в долях)."""
+    cfg = cfg or load_config()
+    stocks = ((cfg.get("trailing") or {}).get("stocks") or {})
+    return (
+        float(stocks.get("aggressive_from_profit_pct") or AGGRESSIVE_PROFIT_PCT),
+        float(stocks.get("aggressive_trail_frac") or AGGRESSIVE_TRAIL_FRAC),
+    )
 
 
 def trail_longs(c: FinamClient) -> None:
@@ -27,7 +43,13 @@ def trail_longs(c: FinamClient) -> None:
         profit_pct = (last / entry - 1.0) * 100
         if profit_pct < 1.0:
             continue
-        target_sl = entry * (1.0 + max(0.0, profit_pct - 1.0) / 100.0)
+        aggressive_from, aggressive_trail = _trail_params()
+        if profit_pct > aggressive_from:
+            # Агрессивный трейлинг: стоп в aggressive_trail от текущей цены
+            target_sl = last * (1.0 - aggressive_trail)
+        else:
+            # Классический трейлинг: стоп = вход + (прибыль - 1)% -> в безубыток при >1%
+            target_sl = entry * (1.0 + max(0.0, profit_pct - 1.0) / 100.0)
         target_sl = round(target_sl, 4)
         if last:
             target_sl = min(target_sl, last - 0.001)  # SL должен быть ниже цены
@@ -49,9 +71,10 @@ def trail_longs(c: FinamClient) -> None:
                 ladder.append(cand)
         placed = False
         last_exc: Exception | None = None
+        comment = f"trail aggressive (прибыль > {aggressive_from}%)" if profit_pct > aggressive_from else "trail 1%/1%"
         for cand in ladder:
             try:
-                c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=cand, comment="trail 1%/1%")
+                c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=cand, comment=comment)
                 print(f"{sym}: SL {cand:.4f} (PnL +{profit_pct:.2f}%)")
                 placed = True
                 break
