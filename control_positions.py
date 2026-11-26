@@ -24,10 +24,10 @@ def trail_longs(c: FinamClient) -> None:
         pnl = num(p.get("unrealized_pnl"), 0.0) or 0.0
         if not entry or not pnl or not last:
             continue
-        profit_pct = (pnl / entry) * 100
+        profit_pct = (last / entry - 1.0) * 100
         if profit_pct < 1.0:
             continue
-        target_sl = entry + max(0.0, profit_pct - 1.0)
+        target_sl = entry * (1.0 + max(0.0, profit_pct - 1.0) / 100.0)
         # SL выше входа для лонга отвергает API (там нет защиты) — ставим на вход
         if target_sl >= entry:
             # API отвергает SL выше входа для лонга — ставим на entry − 0.05
@@ -79,8 +79,13 @@ def main() -> None:
         protected = f"SL {sl}" + (f" / TP {tp}" if tp else "")
         print(f"{sym}: {qty:+.0f} шт, last {num(p.get('current_price')):.4f}, PnL {num(p.get('unrealized_pnl'), 0):+.2f} ₽, {protected if sl else 'РИСК: без SL/TP'}")
     for sym, o in active.items():
-        if not any(p.get("symbol") == sym for p in positions or []):
-            print(f"{sym}: позиции нет, статус {o.get('status')}")
+        if not any(p.get("symbol") == sym and num(p.get("quantity")) for p in positions or []):
+            oid = o.get("order_id")
+            try:
+                c.cancel_order(oid)
+                print(f"{sym}: позиции нет — осиротевший SLTP {oid} снят (защита от шорта)")
+            except Exception as exc:  # noqa: BLE001
+                print(f"{sym}: позиции нет, снять SLTP {oid} не удалось: {exc}")
 
 
 if __name__ == "__main__":
