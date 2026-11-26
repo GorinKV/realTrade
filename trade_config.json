@@ -22,10 +22,10 @@
     "script": "futures_expiry_watch.py"
   },
   "risk_limits": {
-    "_note": "Договорённость 26.11: депозит больше не перегружать. Риск на сделку ≤0.5% equity (risk_pct), номинал фьючерса ≤0.5× equity; автоторговля — ~10% депозита. Газ (NGZ6) закрыт 26.11 — авантюра прекращена, новых входов в газ без отдельного решения нет.",
+    "_note": "Договорённость 26.11: депозит больше не перегружать. Риск на сделку ≤0.5% equity (risk_pct), номинал фьючерса ≤0.5× equity; автоторговля — ~10% депозита. Газ торговать можно, но в этих же лимитах: при входе в NGZ6 трейлинг ставится на фактическое количество лотов (trailing.py --qty N, состояние trailing_state_ngz6.json).",
     "max_risk_per_trade_pct": 0.5,
     "max_futures_notional_x_equity": 0.5,
-    "gas_trading": "stopped_2026-11-26"
+    "gas_trading": "allowed"
   },
   "notifications": {
     "_note": "Все посты/своды агента дублируются в Telegram (sendMessage через telegram.local.json).",
