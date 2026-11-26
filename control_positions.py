@@ -28,12 +28,9 @@ def trail_longs(c: FinamClient) -> None:
         if profit_pct < 1.0:
             continue
         target_sl = entry * (1.0 + max(0.0, profit_pct - 1.0) / 100.0)
-        # SL выше входа для лонга отвергает API (там нет защиты) — ставим на вход
-        if target_sl >= entry:
-            # API отвергает SL выше входа для лонга — ставим на entry − 0.05
-            target_sl = entry - 0.05
+        target_sl = round(target_sl, 4)
         if last:
-            target_sl = min(target_sl, last - 0.001)  # API требует SL ниже цены
+            target_sl = min(target_sl, last - 0.001)  # SL должен быть ниже цены
         if not target_sl or target_sl >= last:
             continue
         active = {o.get("sltp_order", {}).get("symbol"): o for o in c.active_orders() if o.get("sltp_order")}
@@ -44,21 +41,30 @@ def trail_longs(c: FinamClient) -> None:
             continue
         if s.get("order_id"):
             c.cancel_order(s["order_id"])
+        # API принимает SL и выше входа, но требует цену, кратную шагу инструмента.
+        # Пробуем точную цену, затем округляем до 3/2/1 знака.
+        ladder: list[float] = []
+        for cand in (target_sl, round(target_sl, 3), round(target_sl, 2), round(target_sl, 1)):
+            if cand not in ladder and 0 < cand < last:
+                ladder.append(cand)
         placed = False
-        for margin in (0.05, 0.1, 0.2, 0.3):
-            cand = entry - margin
-            if cand >= last:
-                continue
+        last_exc: Exception | None = None
+        for cand in ladder:
             try:
                 c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=cand, comment="trail 1%/1%")
-                print(f"{sym}: SL {cand:.4f} (PnL +{profit_pct:.2f}%), margin {margin}")
+                print(f"{sym}: SL {cand:.4f} (PnL +{profit_pct:.2f}%)")
                 placed = True
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                continue
         if not placed:
-            print(f"{sym}: не удалось выставить SL ({exc})")
+            print(f"{sym}: не удалось выставить SL {target_sl}: {last_exc}")
+            if cur_sl and cur_sl < last:
+                try:
+                    c.place_sltp(sym, "SIDE_SELL", int(qty), sl_price=cur_sl, comment="trail 1%/1% (restore)")
+                    print(f"{sym}: старый стоп {cur_sl} восстановлен")
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"{sym}: ВОССТАНОВИТЬ СТОП НЕ УДАЛОСЬ: {exc2}")
 
 
 def main() -> None:
