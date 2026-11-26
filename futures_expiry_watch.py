@@ -37,23 +37,46 @@ def parse_expiry(text: str):
     return None
 
 
+def build_reminders(today: date, lines: list[str], positions: list[dict] | None = None) -> list[str]:
+    """Напоминания: экспирации в окне (≤3 дня и не дальше дня экспирации) +
+    позиции, открытые на контрактах с истекающим сроком."""
+    exp_map: dict[str, date] = {}
+    reminders: list[str] = []
+    for line in lines:
+        exp = parse_expiry(line)
+        if not exp:
+            continue
+        days = (exp - today).days
+        if days < -1 or days > 3:
+            continue
+        sym = line.split()[0]
+        exp_map[sym] = exp
+        reminders.append(f"⏳ {line} — экспирирует {exp.isoformat()} ({'сегодня' if days <= 0 else f'через {days} дн.'})")
+    for p in positions or []:
+        sym = (p.get("symbol") or "").upper().split("@")[0]
+        exp = exp_map.get(sym)
+        if exp and (exp - today).days <= 3:
+            reminders.append(f"⚠️ Позиция {sym} открыта на контракт с истекающим сроком {exp.isoformat()} — требуется ролл/закрытие.")
+    return reminders
+
+
 def main() -> None:
     if not POLL.exists():
         print("файл не найден", POLL)
         return
     today = datetime.now(MSK).date()
-    lines = []
-    for line in POLL.read_text().splitlines():
-        line = line.split("#")[0].strip().upper()
+    lines: list[str] = []
+    for raw in POLL.read_text().splitlines():
+        line = raw.split("#")[0].strip().upper()
         if not line or line.startswith("-"):
             continue
         exp = parse_expiry(line)
         if exp and (exp - today).days <= 3 and (exp - today).days >= -1:
-            days = (exp - today).days
-            lines.append(f"⏳ {line} — экспирирует {exp.isoformat()} ({'сегодня' if days <= 0 else f'через {days} дн.'})")
-    if lines:
-        print("\n".join(lines))
-        tg_send("⚠️ Напоминание об экспирации фьючерсов:\n" + "\n".join(lines))
+            lines.append(line)
+    reminders = build_reminders(today, lines)
+    if reminders:
+        print("\n".join(reminders))
+        tg_send("⚠️ Напоминание об экспирации фьючерсов:\n" + "\n".join(reminders))
     else:
         print("экспирации скоро нет")
 
