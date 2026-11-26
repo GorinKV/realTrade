@@ -63,10 +63,13 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
     cash = client.cash_rub()
     positions = []
     for p in acc.get("positions") or []:
+        qty = num(p.get("quantity"), 0.0) or 0.0
+        if not qty:
+            continue
         positions.append(
             {
                 "symbol": p.get("symbol"),
-                "qty": num(p.get("quantity"), 0.0) or 0.0,
+                "qty": qty,
                 "avg": num(p.get("average_price")),
                 "last": num(p.get("current_price")),
                 "pnl": num(p.get("unrealized_pnl"), 0.0) or 0.0,
@@ -126,7 +129,45 @@ def portfolio_block(client: FinamClient) -> tuple[list[str], dict]:
             lines.append(
                 f"  ⚠️ {p['symbol']}: без стопа {p['qty'] - covered.get(p['symbol'], 0.0):.0f} шт из {p['qty']:.0f}"
             )
-    return lines, {"equity": equity, "cash": cash, "positions": positions, "protection": pending}
+
+    # Сводка защиты: безубыток (стоп ≥ входа) / защищённая прибыль (стоп ≥ +0.9%) / плюс без безубытка / минус
+    sl_by_symbol = {d["symbol"]: d["sl"] for d in pending if d.get("sl")}
+    stats: dict[str, object] = {
+        "total": len(positions),
+        "breakeven": [],
+        "protected": [],
+        "plus_plain": [],
+        "minus": [],
+        "unprotected": [],
+    }
+    for p in positions:
+        avg, last = p.get("avg") or 0.0, p.get("last") or 0.0
+        if not avg:
+            continue
+        sym = (p["symbol"] or "").split("@")[0]
+        sl = sl_by_symbol.get(p["symbol"])
+        ratio = (sl / avg - 1.0) if sl else None
+        if not sl:
+            stats["unprotected"].append(sym)
+        if ratio is not None and ratio >= 0.009:
+            stats["protected"].append(sym)
+        elif ratio is not None and ratio >= -0.001:
+            stats["breakeven"].append(sym)
+        elif last < avg:
+            stats["minus"].append(sym)
+        else:
+            stats["plus_plain"].append(sym)
+    def _fmt(name: str, items: list[str]) -> str:
+        return f"{name}: {len(items)}" + (f" — {', '.join(items)}" if items else " — нет")
+
+    lines.append(f"  Защита портфеля: позиций {stats['total']}")
+    lines.append("    " + _fmt("безубыток (стоп ≥ входа)", stats["breakeven"]))
+    lines.append("    " + _fmt("защищённая прибыль (стоп ≥ +0.9%)", stats["protected"]))
+    lines.append("    " + _fmt("плюс без безубытка", stats["plus_plain"]))
+    lines.append("    " + _fmt("в минусе", stats["minus"]))
+    if stats["unprotected"]:
+        lines.append("    " + _fmt("⚠️ без стопа", stats["unprotected"]))
+    return lines, {"equity": equity, "cash": cash, "positions": positions, "protection": pending, "stats": stats}
 
 
 def enrich_with_finam(client: FinamClient, candidates: list[dict]) -> list[dict]:
